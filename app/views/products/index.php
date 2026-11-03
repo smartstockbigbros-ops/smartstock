@@ -11,7 +11,7 @@
 
         <div class="toolbar">
             <a href="<?= site_url('products/create') ?>" class="btn-add">➕ Add Product</a>
-            <a href="<?= site_url('auth/logout') ?>" class="btn-logout">🚪 Logout</a>
+            <a href="<?= site_url('logout') ?>" class="btn-logout">🚪 Logout</a>
         </div>
 
         <table>

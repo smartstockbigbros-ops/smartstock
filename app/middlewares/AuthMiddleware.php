@@ -8,7 +8,7 @@ class AuthMiddleware
         $lava->call->library('session');
 
         if (!$lava->session->userdata('logged_in')) {
-            redirect('auth/login');
+            redirect('login');
             exit;
         }
 

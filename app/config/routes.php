@@ -44,13 +44,38 @@ defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 */
 /** @var object $router **/
 
-// Public authentication routes
-$router->match('/auth/login', 'AuthController::login', ['GET', 'POST']);
-$router->match('/auth/register', 'AuthController::register', ['GET', 'POST']);
-$router->get('/auth/logout', 'AuthController::logout');
+// Public authentication routes – real, server-side auth (users table). See
+// AuthController / app/libraries/Auth.php / app/libraries/GoogleAuth.php.
+$router->match('/login',    'AuthController::login',    ['GET', 'POST']);
+$router->match('/register', 'AuthController::register', ['GET', 'POST']);
+$router->get('/logout',     'AuthController::logout');
+$router->match('/forgot-password',        'AuthController::forgot', ['GET', 'POST']);
+$router->match('/reset-password/{token}', 'AuthController::reset',  ['GET', 'POST']);
+$router->get('/auth/google',          'AuthController::google');
+$router->get('/auth/google/callback', 'AuthController::google_callback');
 
-// Root – redirect to login
-$router->get('/', 'AuthController::login');
+// Everything below requires a logged-in session (AuthMiddleware -> redirects to /login).
+$router->group(['middleware' => 'auth'], function ($router) {
+    $router->get('/', 'SmartStockController::dashboard');
+
+    // SmartStock corrosion-risk monitoring prototype
+    $router->get('/dashboard',  'SmartStockController::dashboard');
+    $router->get('/monitoring', 'SmartStockController::monitoring');
+    $router->get('/corrosion',  'SmartStockController::corrosion');
+    $router->get('/alerts',     'SmartStockController::alerts');
+    $router->get('/pos',        'SmartStockController::pos');
+
+    // Hardware inventory – server-rendered, database-backed (see InventoryController / InventoryModel)
+    $router->get('/inventory',             'InventoryController::index');
+    $router->match('/inventory/create',    'InventoryController::create', ['GET', 'POST']);
+    $router->match('/inventory/edit/{id}', 'InventoryController::edit',   ['GET', 'POST']);
+    $router->post('/inventory/adjust/{id}', 'InventoryController::adjust');
+    $router->post('/inventory/delete/{id}', 'InventoryController::delete');
+    $router->get('/inventory/movements/{id}', 'InventoryController::movements');
+    $router->get('/inventory/reorder',      'InventoryController::reorder');
+    $router->get('/inventory/export',       'InventoryController::export');
+    $router->match('/inventory/import',     'InventoryController::import', ['GET', 'POST']);
+});
 
 // Product CRUD – protected by 'auth' middleware
 $router->group(['prefix' => '/products', 'middleware' => 'auth'], function ($router) {
@@ -59,4 +84,3 @@ $router->group(['prefix' => '/products', 'middleware' => 'auth'], function ($rou
     $router->match('/edit/{id}', 'ProductController::edit', ['GET', 'POST']);
     $router->get('/delete/{id}', 'ProductController::delete');
 });
-

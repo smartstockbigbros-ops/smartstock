@@ -6,6 +6,11 @@ class ProductModel extends Model
     protected $fillable = ['product_name', 'description', 'price', 'quantity'];
     protected $timestamps = false;
 
+    public function __construct() {
+        parent::__construct();
+        $this->call->database();
+    }
+
     public function get_all_products() {
         return $this->all();
     }
