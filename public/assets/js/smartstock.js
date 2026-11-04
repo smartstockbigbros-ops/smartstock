@@ -31,28 +31,45 @@
       i(8, 'PNT-001', 'Red Oxide Primer 4L', 'Paint', '', 22, 'can', 10, 640, 'Rack E-1', 'ColorWorks', false)
     ];
   }
-  function seed() {
-    var now = Date.now(), n = 40, r = [], i, hum, temp, s = 42;
+  /* Two sensor nodes (prototype). Sensor 1 = state.readings / state.online (kept so older saved data
+   * still loads); Sensor 2 = state.s2. Replace with real device feeds in Progress 3 / Capstone. */
+  var SENSORS = [{ name: 'Sensor 1', place: 'Storage Room A' }, { name: 'Sensor 2', place: 'Storage Room B' }];
+  function series(seedVal, dHum, dTemp, lastT, lastH) {
+    var now = Date.now(), n = 40, r = [], i, hum, temp, s = seedVal;
     function rnd() { s = (s * 16807) % 2147483647; return s / 2147483647; } // deterministic noise
     for (i = 0; i < n; i++) {
       hum = i < 6 ? 58 + Math.round(rnd() * 4)
         : Math.max(65, Math.min(70, Math.round(67 + 2.5 * Math.sin(i / 4 + 1) + (rnd() - .5) * 2)));
       temp = Math.max(27.4, Math.min(29.8, +(28.2 + 1.1 * Math.sin(i / 5) + (i / n) * .3 + (rnd() - .5) * .4).toFixed(1)));
-      if (i === n - 1) { hum = 67; temp = 28.7; }
+      hum += dHum; temp = +(temp + dTemp).toFixed(1);
+      if (i === n - 1) { hum = lastH; temp = lastT; }
       r.push({ ts: now - (n - 1 - i) * INTERVAL, temp: temp, hum: hum });
     }
+    return r;
+  }
+  function seed2() { return { online: true, readings: series(7, 3, -.3, 29.4, 71) }; }
+  function seed() {
+    var now = Date.now();
     return {
-      online: true, readings: r, inventory: seedInventory(), sales: [],
+      online: true, readings: series(42, 0, 0, 28.7, 67), s2: seed2(), inventory: seedInventory(), sales: [],
       alerts: [
-        { id: 1, type: 'success', title: 'Sensor Online', message: 'Sensor Successfully Turned On', ts: now - 900000, read: true },
-        { id: 2, type: 'danger', title: 'Sensor Offline', message: 'Sensor Disconnected', ts: now - 600000, read: true },
-        { id: 3, type: 'warning', title: 'High Temperature', message: 'Sensor Reached 35.4C (Threshold 30.0 C).', ts: now - 300000, read: false },
-        { id: 4, type: 'warning', title: 'High Humidity', message: 'Sensor Reached 85% RH (Threshold 80%).', ts: now - 240000, read: false }
+        { id: 1, type: 'success', title: 'Sensor 1 Online', message: 'Sensor 1 Successfully Turned On', ts: now - 900000, read: true },
+        { id: 2, type: 'danger', title: 'Sensor 2 Offline', message: 'Sensor 2 Disconnected', ts: now - 600000, read: true },
+        { id: 3, type: 'warning', title: 'High Temperature', message: 'Sensor 1 Reached 35.4C (Threshold 30.0 C).', ts: now - 300000, read: false },
+        { id: 4, type: 'warning', title: 'High Humidity', message: 'Sensor 2 Reached 85% RH (Threshold 80%).', ts: now - 240000, read: false }
       ]
     };
   }
   function load() {
-    try { var s = JSON.parse(localStorage.getItem(KEY)); if (s && s.readings && s.readings.length) { if (!s.inventory) s.inventory = seedInventory(); if (!s.sales) s.sales = []; return s; } } catch (e) {}
+    try {
+      var s = JSON.parse(localStorage.getItem(KEY));
+      if (s && s.readings && s.readings.length) {
+        if (!s.inventory) s.inventory = seedInventory();
+        if (!s.sales) s.sales = [];
+        if (!s.s2 || !s.s2.readings || !s.s2.readings.length) s.s2 = seed2(); // older saves had one sensor
+        return s;
+      }
+    } catch (e) {}
     return seed();
   }
   var memoryOnly = false;
@@ -64,24 +81,31 @@
   /* ---------- risk logic ---------- */
   function points(t, h) { return (h >= 80 ? 3 : h >= 65 ? 2 : h >= 50 ? 1 : 0) + (t >= 30 ? 2 : t >= 28 ? 1 : 0); }
   function level(p) { return p >= 5 ? 'Critical' : p >= 3 ? 'High' : p >= 2 ? 'Moderate' : 'Low'; }
-  function latest() { return state.readings[state.readings.length - 1]; }
+  function rd(i) { return i ? state.s2.readings : state.readings; }
+  function isOn(i) { return i ? state.s2.online : state.online; }
+  function setOn(i, v) { if (i) state.s2.online = v; else state.online = v; }
+  function lastOf(i) { var r = rd(i); return r[r.length - 1]; }
+  /* The worse of the two sensors drives item risk, the overall level and the status message. */
+  function worstIdx() { var a = lastOf(0), b = lastOf(1); return points(b.temp, b.hum) > points(a.temp, a.hum) ? 1 : 0; }
+  function latest() { return lastOf(worstIdx()); }
   function readingStatus(r) { return (r.temp >= TEMP_T || r.hum >= HUM_T) ? 'Critical' : points(r.temp, r.hum) >= 3 ? 'Elevated' : 'Normal'; }
   function unread() { return state.alerts.filter(function (a) { return !a.read; }).length; }
-  function exposureMin() {
-    var rs = state.readings, c = 0, i; for (i = rs.length - 1; i >= 0; i--) { if (points(rs[i].temp, rs[i].hum) < 2) break; c++; }
+  function exposureMin(i) {
+    if (i === undefined) return Math.max(exposureMin(0), exposureMin(1)); // overall = longest-running exposure
+    var rs = rd(i), c = 0, k; for (k = rs.length - 1; k >= 0; k--) { if (points(rs[k].temp, rs[k].hum) < 2) break; c++; }
     if (!c) return 0;
     // elapsed time since the run began (+1 interval for the first reading) - correct for any reading spacing
     return Math.max(5, Math.round((rs[rs.length - 1].ts - rs[rs.length - c].ts) / 60000) + 5);
   }
   function dur(m) { return m < 60 ? m + 'm' : Math.floor(m / 60) + 'h ' + ('0' + (m % 60)).slice(-2) + 'm'; }
-  function items() {
-    var l = latest(), base = points(l.temp, l.hum);
+  function items(i) {
+    var l = i === undefined ? latest() : lastOf(i), base = points(l.temp, l.hum); // no arg = worst of both sensors
     return ITEMS.map(function (it) { var p = Math.max(0, base + (it.offset || 0)); return { product: it.product, category: it.category, points: p, risk: level(p), status: it.status || 'On stock' }; })
       .sort(function (a, b) { return b.points - a.points; });
   }
-  function counts() { var c = { Low: 0, Moderate: 0, High: 0, Critical: 0 }; items().forEach(function (i) { c[i.risk]++; }); return c; }
-  function message() {
-    var l = latest(), hot = l.temp >= 28, humid = l.hum >= 65;
+  function counts(i) { var c = { Low: 0, Moderate: 0, High: 0, Critical: 0 }; items(i).forEach(function (i) { c[i.risk]++; }); return c; }
+  function message(i) {
+    var l = i === undefined ? latest() : lastOf(i), hot = l.temp >= 28, humid = l.hum >= 65;
     if (humid && hot) return 'High humidity and elevated temperature detected. Prolonged exposure may increase the risk of corrosion for metal hardware.';
     if (humid) return 'High humidity detected. Moisture in the air can speed up rust on unprotected metal hardware.';
     if (hot) return 'Elevated temperature detected. Heat combined with rising humidity can accelerate corrosion.';
@@ -95,39 +119,49 @@
   function rand(a, b) { return a + Math.floor(Math.random() * (b - a + 1)); }
   /* Script-generated reading: drifts toward a slowly oscillating target (so the dashboard moves through
    * Normal -> Elevated -> Critical over a few minutes) plus a little noise. */
-  function nextReading(p) {
-    var phase = Math.sin(Date.now() / 1000 / 90),
-      tTarget = 28.5 + 2.2 * phase, hTarget = 69 + 14 * phase,
+  function nextReading(p, idx) {
+    var phase = Math.sin(Date.now() / 1000 / 90 + (idx ? 2.1 : 0)), // sensor 2 is out of step with sensor 1
+      tTarget = (idx ? 28.0 : 28.5) + 2.2 * phase, hTarget = (idx ? 66 : 69) + 14 * phase,
       temp = +Math.max(22, Math.min(38, p.temp + (tTarget - p.temp) * 0.2 + rand(-3, 3) / 10)).toFixed(1),
       hum = Math.round(Math.max(35, Math.min(95, p.hum + (hTarget - p.hum) * 0.2 + rand(-3, 3))));
     return { ts: Date.now(), temp: temp, hum: hum };
   }
-  function addReading() {
-    var p = latest(), r = nextReading(p);
-    state.readings.push(r);
-    state.readings = state.readings.slice(-200);
-    // alert only when a threshold is newly crossed, so the feed doesn't spam
-    if (r.hum >= HUM_T && p.hum < HUM_T) pushAlert('warning', 'High Humidity', 'Sensor Reached ' + r.hum + '% RH (Threshold ' + HUM_T + '%).');
-    if (r.temp >= TEMP_T && p.temp < TEMP_T) pushAlert('warning', 'High Temperature', 'Sensor Reached ' + r.temp + 'C (Threshold ' + TEMP_T.toFixed(1) + ' C).');
+  function addReading(idx) {
+    var p = lastOf(idx), r = nextReading(p, idx), who = SENSORS[idx].name, rs = rd(idx);
+    rs.push(r);
+    if (rs.length > 200) rs.splice(0, rs.length - 200);
+    // Alert only when a threshold is newly crossed, and at most once per sensor per type every 3 minutes
+    // (a value jittering around the threshold would otherwise re-alert constantly).
+    function recent(title) { return state.alerts.some(function (a) { return a.title === title && a.message.indexOf(who) === 0 && Date.now() - a.ts < 180000; }); }
+    if (r.hum >= HUM_T && p.hum < HUM_T && !recent('High Humidity')) pushAlert('warning', 'High Humidity', who + ' Reached ' + r.hum + '% RH (Threshold ' + HUM_T + '%).');
+    if (r.temp >= TEMP_T && p.temp < TEMP_T && !recent('High Temperature')) pushAlert('warning', 'High Temperature', who + ' Reached ' + r.temp + 'C (Threshold ' + TEMP_T.toFixed(1) + ' C).');
     return r;
   }
-  function startSensor() {
-    if (!state.online) { state.online = true; pushAlert('success', 'Sensor Online', 'Sensor Successfully Turned On'); }
-    var r = addReading();
-    save(); render(); toast('Sensor started - new reading ' + r.temp + ' C / ' + r.hum + '% RH');
+  function which(idx) { return (idx === 0 || idx === 1) ? [idx] : [0, 1]; } // undefined = both sensors
+  function startSensor(idx) {
+    var done = [];
+    which(idx).forEach(function (k) {
+      if (!isOn(k)) { setOn(k, true); pushAlert('success', SENSORS[k].name + ' Online', SENSORS[k].name + ' Successfully Turned On'); }
+      var r = addReading(k); done.push(SENSORS[k].name + ' ' + r.temp + ' C / ' + r.hum + '% RH');
+    });
+    save(); render(); toast('New reading - ' + done.join(' · '));
   }
-  /* Automatic feed. Re-reads storage first and skips if another tab just wrote a reading, so
-   * several open tabs don't multiply the readings. */
+  /* Automatic feed. Re-reads storage first and only adds a reading if one is due, so several open tabs
+   * don't multiply the readings. Each sensor runs independently and only while it is Online. */
   function autoTick() {
     if (document.hidden || !LIVE_PAGES[page]) return;
     state = load();
-    if (!state.online) return;
-    if (Date.now() - latest().ts < AUTO_MS - 1000) return;
-    addReading(); save(); render();
+    var added = false;
+    [0, 1].forEach(function (k) {
+      if (isOn(k) && Date.now() - lastOf(k).ts >= AUTO_MS - 1000) { addReading(k); added = true; }
+    });
+    if (added) { save(); render(); }
   }
-  function stopSensor() {
-    if (state.online) { state.online = false; pushAlert('danger', 'Sensor Offline', 'Sensor Disconnected', true); }
-    save(); render(); toast('Sensor taken offline');
+  function stopSensor(idx) {
+    which(idx).forEach(function (k) {
+      if (isOn(k)) { setOn(k, false); pushAlert('danger', SENSORS[k].name + ' Offline', SENSORS[k].name + ' Disconnected', true); }
+    });
+    save(); render(); toast(idx === 0 || idx === 1 ? SENSORS[idx].name + ' taken offline' : 'Sensors taken offline');
   }
   function markAll() { state.alerts.forEach(function (a) { a.read = true; }); save(); render(); toast('All notifications marked as read'); }
   function reset() { state = seed(); save(); render(); toast('Demo data reset'); }
@@ -309,8 +343,8 @@
     inventory: invView,
     pos: posView,
     dashboard: function () {
-      var l = latest(), c = counts(), it = items(), total = it.length, risk = level(points(l.temp, l.hum)),
-        avg = Math.round(state.readings.slice(-12).reduce(function (a, r) { return a + r.hum; }, 0) / Math.min(12, state.readings.length)),
+      var l = latest(), a0 = lastOf(0), a1 = lastOf(1), lastTs = Math.max(a0.ts, a1.ts), c = counts(), it = items(), total = it.length,
+        avg = Math.round((a0.hum + a1.hum) / 2),
         colors = { Low: '#9fe3ea', Moderate: '#17a9b8', High: '#f59e0b', Critical: '#dc2626' };
       var R = 52, C = 2 * Math.PI * R, off = 0, arcs = '';
       Object.keys(c).forEach(function (k) {
@@ -319,45 +353,58 @@
         off += len;
       });
       return '<section class="stat-grid four">' +
-        stat('thermo', 'Temperature', val(l.temp.toFixed(1), 'C')) +
-        stat('drop', 'Avg. Humidity', val(avg + '%', 'RH')) +
+        stat('thermo', 'Temperature', val(Math.max(a0.temp, a1.temp).toFixed(1), 'C'), '<div class="stat-sub">highest of 2 sensors</div>') +
+        stat('drop', 'Avg. Humidity', val(avg + '%', 'RH'), '<div class="stat-sub">across 2 sensors</div>') +
         stat('box', 'High Risk Items', val(c.High + c.Critical, '', 'orange'), '<div class="stat-sub">of ' + total + ' items</div>') +
         stat('bell', 'Active Alerts', val(unread(), '', 'red'), '<div class="stat-sub">needs attention</div>') +
         '</section><section class="dash-grid"><div class="col">' +
-        '<div class="card"><table class="table compact"><thead><tr><th>Temperature</th><th>Humidity</th><th>Exposure Duration</th><th>Risk Level</th><th>Status</th></tr></thead><tbody><tr><td>' +
-        l.temp.toFixed(1) + ' C</td><td>' + l.hum + '%</td><td>' + dur(exposureMin()) + '</td><td><strong class="risk-text ' + RC[risk] + '">' + risk + '</strong></td><td><strong>' + (state.online ? 'Online' : 'Offline') + '</strong></td></tr></tbody></table></div>' +
+        '<div class="card"><table class="table compact"><thead><tr><th>Sensor</th><th>Temperature</th><th>Humidity</th><th>Exposure Duration</th><th>Risk Level</th><th>Status</th></tr></thead><tbody>' +
+        [0, 1].map(function (k) {
+          var r = lastOf(k), rk = level(points(r.temp, r.hum));
+          return '<tr><td><b>' + SENSORS[k].name + '</b><div class="stat-sub">' + SENSORS[k].place + '</div></td><td>' + r.temp.toFixed(1) + ' C</td><td>' + r.hum + '%</td><td>' + dur(exposureMin(k)) +
+            '</td><td><strong class="risk-text ' + RC[rk] + '">' + rk + '</strong></td><td><strong>' + (isOn(k) ? 'Online' : 'Offline') + '</strong></td></tr>';
+        }).join('') + '</tbody></table></div>' +
         '<div class="card grow"><div class="card-title">Top Affected Metal Hardware</div><table class="table"><thead><tr><th>Product</th><th>Category</th><th>Risk Level</th><th>Status</th></tr></thead><tbody>' +
         (it.length ? it.slice(0, 3).map(function (i) { return '<tr><td>' + esc(i.product) + '</td><td>' + i.category + '</td><td><span class="risk-text ' + RC[i.risk] + '">' + i.risk + '</span></td><td>' + i.status + '</td></tr>'; }).join('')
           : '<tr><td colspan="4" class="empty">No corrosion-sensitive items in inventory yet. <a class="link" href="' + SS.inventoryUrl + '">Mark some on the Inventory page.</a></td></tr>') +
         '</tbody></table></div></div><div class="col"><div class="card grow donut-card"><svg class="donut" viewBox="0 0 140 140" role="img" aria-label="Items by risk level"><circle cx="70" cy="70" r="' + R + '" fill="none" stroke="#eef2f5" stroke-width="12"/>' + arcs +
         '<text x="70" y="68" text-anchor="middle" class="donut-n">' + total + '</text><text x="70" y="84" text-anchor="middle" class="donut-l">items</text></svg><ul class="legend">' +
         Object.keys(c).map(function (k) { return '<li><i style="background:' + colors[k] + '"></i><span>' + k + '</span><b>' + c[k] + '</b></li>'; }).join('') +
-        '</ul></div><div class="card last-update"><div class="stat-label tiny">Last Sensor Update</div><div class="update-time">' + ic('clock', 15) + ' ' + tm(l.ts) + ' · ' + new Date(l.ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) + '</div></div></div></section>';
+        '</ul></div><div class="card last-update"><div class="stat-label tiny">Last Sensor Update</div><div class="update-time">' + ic('clock', 15) + ' ' + tm(lastTs) + ' · ' + new Date(lastTs).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) + '</div></div></div></section>';
     },
     monitoring: function () {
-      var l = latest(), s = state.readings.slice(-12), rec = state.readings.slice(-5).reverse(),
-        pc = { Normal: 'normal', Elevated: 'elevated', Critical: 'critical' };
-      return '<section class="stat-grid three">' +
-        stat('thermo', 'Temperature', val(l.temp.toFixed(1), 'C')) +
-        stat('drop', 'Humidity', val(l.hum + '%', 'RH')) +
-        stat('wifi', 'Sensor Status', '<div class="status-line ' + (state.online ? 'on' : 'off') + '"><i></i>' + (state.online ? 'Online' : 'Offline') + '</div><div class="stat-sub">Last Update: ' + tm(l.ts).toLowerCase() + ' · <a href="#" class="link" data-' + (state.online ? 'stop' : 'start') + '-sensor>' + (state.online ? 'Simulate offline' : 'Bring online') + '</a></div>') +
-        '</section><section class="chart-grid"><div class="card"><div class="card-title upper">Temperature (C)</div>' + chart(s.map(function (r) { return r.temp; }), 'temp') +
-        '</div><div class="card"><div class="card-title upper">Humidity (% RH)</div>' + chart(s.map(function (r) { return r.hum; }), 'hum') + '</div></section>' +
-        '<section class="card grow"><div class="card-title">Recent Readings</div><table class="table"><thead><tr><th>Date &amp; Time</th><th>Temperature</th><th>Humidity</th><th>Status</th></tr></thead><tbody>' +
-        rec.map(function (r) { var st = readingStatus(r); return '<tr><td>' + dt(r.ts) + '</td><td>' + r.temp.toFixed(1) + ' C</td><td>' + r.hum + '% RH</td><td><span class="pill ' + pc[st] + '">' + st + '</span></td></tr>'; }).join('') +
+      var pc = { Normal: 'normal', Elevated: 'elevated', Critical: 'critical' }, out = '', recs = [];
+      [0, 1].forEach(function (k) {
+        var l = lastOf(k), s = rd(k).slice(-12), on = isOn(k), st = readingStatus(l), act = on ? 'stop' : 'start';
+        out += '<div class="sensor-label"><i class="dot ' + (on ? 'on' : 'off') + '"></i><b>' + SENSORS[k].name + '</b> · ' + SENSORS[k].place + ' <span class="pill ' + pc[st] + '">' + st + '</span></div>' +
+          '<section class="stat-grid three">' +
+          stat('thermo', 'Temperature', val(l.temp.toFixed(1), 'C')) +
+          stat('drop', 'Humidity', val(l.hum + '%', 'RH')) +
+          stat('wifi', 'Sensor Status', '<div class="status-line ' + (on ? 'on' : 'off') + '"><i></i>' + (on ? 'Online' : 'Offline') + '</div><div class="stat-sub">Last Update: ' + tm(l.ts).toLowerCase() + ' · <a href="#" class="link" data-' + act + '-sensor="' + k + '">' + (on ? 'Simulate offline' : 'Bring online') + '</a></div>') +
+          '</section><section class="chart-grid"><div class="card"><div class="card-title upper">Temperature (C)</div>' + chart(s.map(function (r) { return r.temp; }), 'temp' + k) +
+          '</div><div class="card"><div class="card-title upper">Humidity (% RH)</div>' + chart(s.map(function (r) { return r.hum; }), 'hum' + k) + '</div></section>';
+        rd(k).slice(-5).forEach(function (r) { recs.push({ k: k, r: r }); });
+      });
+      recs.sort(function (a, b) { return b.r.ts - a.r.ts; }); recs = recs.slice(0, 8);
+      return out + '<section class="card grow"><div class="card-title">Recent Readings</div><table class="table"><thead><tr><th>Date &amp; Time</th><th>Sensor</th><th>Temperature</th><th>Humidity</th><th>Status</th></tr></thead><tbody>' +
+        recs.map(function (x) { var r = x.r, st = readingStatus(r); return '<tr><td>' + dt(r.ts) + '</td><td>' + SENSORS[x.k].name + '</td><td>' + r.temp.toFixed(1) + ' C</td><td>' + r.hum + '% RH</td><td><span class="pill ' + pc[st] + '">' + st + '</span></td></tr>'; }).join('') +
         '</tbody></table></section>';
     },
     corrosion: function () {
-      var l = latest(), c = counts(), risk = level(points(l.temp, l.hum)), hi = c.High + c.Critical, total = c.Low + c.Moderate + hi;
-      return '<section class="risk-row"><div class="card risk-card"><div class="stat-label tiny upper">Corrosion Risk Level</div><div class="risk-badge ' + RC[risk] + '">' + ic('alert', 26) + '<span>' + risk.toUpperCase() + '</span></div></div>' +
-        '<button class="card start-card" data-start-sensor><span class="play">' + ic('play', 14) + '</span><span>START SENSOR MANUALLY</span></button></section>' +
-        '<section class="stat-grid four">' + stat('thermo', 'Temperature', val(l.temp.toFixed(1), 'C')) + stat('drop', 'Humidity', val(l.hum + '%', 'RH')) +
-        stat('clock', 'Exposure Duration', val(dur(exposureMin()), '', 'orange'), '<div class="stat-sub">affecting ' + hi + ' of ' + total + ' items</div>') +
-        stat('wifi', 'Sensor Status', val(state.online ? 'Online' : 'Offline', '', 'teal sm'), '<div class="stat-sub">' + (state.online ? 'needs attention' : 'no new readings') + '</div>') + '</section>' +
-        '<section class="card"><div class="card-head">Environment Condition</div><div class="condition"><span class="warn-dot">!</span><p>' + esc(message()) + '</p></div>' +
-        (total === 0 ? '<p class="stat-sub">No items are marked corrosion-sensitive in inventory yet, so nothing is being tracked here. <a class="link" href="' + SS.inventoryUrl + '">Mark some on the Inventory page.</a></p>' : '') +
-        '</section>' +
-        '<a class="btn btn-dark float-btn" href="' + SS.dashboardUrl + '">Go back to Dashboard</a>';
+      var out = '';
+      [0, 1].forEach(function (k) {
+        var r = lastOf(k), on = isOn(k), risk = level(points(r.temp, r.hum)), c = counts(k), hi = c.High + c.Critical, total = c.Low + c.Moderate + hi;
+        out += '<div class="sensor-label"><i class="dot ' + (on ? 'on' : 'off') + '"></i><b>' + SENSORS[k].name + '</b> · ' + SENSORS[k].place + '</div>' +
+          '<section class="risk-row"><div class="card risk-card"><div class="stat-label tiny upper">Corrosion Risk Level</div><div class="risk-badge ' + RC[risk] + '">' + ic('alert', 26) + '<span>' + risk.toUpperCase() + '</span></div></div>' +
+          '<button class="card start-card" data-start-sensor="' + k + '"><span class="play">' + ic('play', 14) + '</span><span>START ' + SENSORS[k].name.toUpperCase() + ' MANUALLY</span></button></section>' +
+          '<section class="stat-grid four">' + stat('thermo', 'Temperature', val(r.temp.toFixed(1), 'C')) + stat('drop', 'Humidity', val(r.hum + '%', 'RH')) +
+          stat('clock', 'Exposure Duration', val(dur(exposureMin(k)), '', 'orange'), '<div class="stat-sub">affecting ' + hi + ' of ' + total + ' items</div>') +
+          stat('wifi', 'Sensor Status', val(on ? 'Online' : 'Offline', '', 'teal sm'), '<div class="stat-sub">' + (on ? 'needs attention' : 'no new readings') + ' · <a href="#" class="link" data-' + (on ? 'stop' : 'start') + '-sensor="' + k + '">' + (on ? 'Simulate offline' : 'Bring online') + '</a></div>') + '</section>' +
+          '<section class="card"><div class="card-head">Environment Condition</div><div class="condition"><span class="warn-dot">!</span><p>' + esc(message(k)) + '</p></div>' +
+          (total === 0 && k === 0 ? '<p class="stat-sub">No items are marked corrosion-sensitive in inventory yet, so nothing is being tracked here. <a class="link" href="' + SS.inventoryUrl + '">Mark some on the Inventory page.</a></p>' : '') +
+          '</section>';
+      });
+      return out + '<a class="btn btn-dark float-btn" href="' + SS.dashboardUrl + '">Go back to Dashboard</a>';
     },
     alerts: function () {
       var ico = { warning: 'alert', danger: 'xcircle', success: 'check' };
@@ -393,8 +440,10 @@
     var t = e.target.closest('[data-start-sensor],[data-stop-sensor],#markAll,#resetData,[data-logout]');
     if (!t || t.disabled) return;
     e.preventDefault();
-    if (t.hasAttribute('data-start-sensor')) startSensor();
-    else if (t.hasAttribute('data-stop-sensor')) stopSensor();
+    // attribute value "0"/"1" targets one sensor; empty (the big Start button) targets both
+    var sv = function (n) { var v = t.getAttribute(n); return v === '0' ? 0 : v === '1' ? 1 : undefined; };
+    if (t.hasAttribute('data-start-sensor')) startSensor(sv('data-start-sensor'));
+    else if (t.hasAttribute('data-stop-sensor')) stopSensor(sv('data-stop-sensor'));
     else if (t.id === 'markAll') markAll();
     else if (t.id === 'resetData') reset();
     else if (t.hasAttribute('data-logout')) logout();

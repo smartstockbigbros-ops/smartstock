@@ -266,7 +266,7 @@ $config['cookie_path']             = '/';
 $config['cookie_secure']           = FALSE;
 $config['cookie_expiration']       = 86400;
 $config['cookie_httponly']         = FALSE;
-$config['cookie_samesite']         = 'Lax';
+$config['cookie_samesite']         = 'Lax'; // NOT 'Strict': Strict drops the session cookie when Google redirects back to /auth/google/callback, so Google sign-in fails with "invalid state". Lax still blocks cross-site POSTs.
 
 /*
 |--------------------------------------------------------------------------
